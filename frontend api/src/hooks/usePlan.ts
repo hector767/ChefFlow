@@ -14,7 +14,7 @@ export const loadState = (): AppState => {
     }
 };
 
-export default function useStateState() {
+export default function usePlan() {
     const [state, setState] = useState<AppState>(loadState());
 
     //we rly should not be saving state. Maybe with a redis cache or something. Maybe. I dont want to redo this tho

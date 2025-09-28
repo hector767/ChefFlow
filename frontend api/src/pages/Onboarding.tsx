@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import requestMealPlan from "../helpers/requestMealPlan";
 import useProfile from "../hooks/useProfile";
 import { wait } from "../helpers/util";
-import useStateState from "../hooks/useStateState";
+import usePlan from "../hooks/usePlan";
 import LoadingScreen from "../components/LoadingScreen";
 import Card from "../components/Card";
 import type { UserProfile } from "../types";
@@ -10,7 +10,7 @@ import type { UserProfile } from "../types";
 // ========== Onboarding ==========
 export default function Onboarding({ onDone }: { onDone: () => void }) {
     const { profile, setProfile, saveProfile } = useProfile();
-    const { inventory, queue, } = useStateState();
+    const { inventory } = usePlan();
 
     const [loading, setLoading] = useState(false);
     const [visible, setVisible] = useState(false); // fade-in
@@ -49,6 +49,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     };
 
     if (loading) return <LoadingScreen label="Setting things up" />;
+
 
     const Meter = ({ label, value, base }: { label: string; value: number | null | undefined; base: number }) => {
         const percent = pct(value, base);

@@ -5,7 +5,7 @@ import LoadingScreen from "./components/LoadingScreen";
 import Onboarding from "./pages/Onboarding";
 import QueuePage from "./pages/QueuePage";
 import { wait } from "./helpers/util";
-import useStateState from "./hooks/useStateState";
+import usePlan from "./hooks/usePlan";
 
 /**
  * ChefFlow — Frontend-only demo (single file)
@@ -18,7 +18,7 @@ import useStateState from "./hooks/useStateState";
 // ========== Root App ==========
 export default function App() {
   const { profile, saveProfile } = useProfile();
-  const { setState, saveState, ...state } = useStateState();
+  const { setState, saveState, ...state } = usePlan();
 
   const [route, setRoute] = useState<"loading" | "onboarding" | "queue">("loading");
 
