@@ -1,19 +1,17 @@
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
 from dotenv import load_dotenv
-import os, requests, time, threading
+import os, requests
 
-#version 3 
 # Load .env variables
 load_dotenv()
 
-app = FastAPI(title="ZeroWaste Chef", version="0.2.0")
+app = FastAPI(title="ZeroWaste Chef", version="0.1.0")
 
-# CORS — allow all for hackathon; lock down to your FE origin later
+# CORS — allow all for hackathon; lock this down to your FE origin later
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # e.g., ["http://localhost:5173", "https://your-frontend.app"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,77 +25,7 @@ NIX_API_KEY = (os.getenv("NUTRITIONIX_API_KEY") or "").strip()
 SPOON_URL = "https://api.spoonacular.com/recipes"
 SPOON_KEY = (os.getenv("SPOONACULAR_API_KEY") or "").strip()  # optional
 
-# === Safety & Rate Limit Helpers ===
-# Simple token-bucket for local rate limiting (tune to your plan/limits)
-RL_CONFIG = {
-    "nutritionix": {"capacity": 30, "refill_per_sec": 30 / 60},   # ~30/min
-    "spoonacular": {"capacity": 60, "refill_per_sec": 60 / 60},   # ~60/min
-}
-_buckets = {name: {"tokens": cfg["capacity"], "last": time.time()} for name, cfg in RL_CONFIG.items()}
-_lock = threading.Lock()
-
-def _acquire_token(service: str) -> bool:
-    cfg = RL_CONFIG[service]
-    with _lock:
-        b = _buckets[service]
-        now = time.time()
-        # refill
-        b["tokens"] = min(cfg["capacity"], b["tokens"] + (now - b["last"]) * cfg["refill_per_sec"])
-        b["last"] = now
-        if b["tokens"] >= 1:
-            b["tokens"] -= 1
-            return True
-        return False
-
-# Tiny in-memory cache (key -> (expiry_ts, data))
-_cache = {}
-def cache_get(key: str):
-    v = _cache.get(key)
-    if not v:
-        return None
-    exp, data = v
-    if exp < time.time():
-        _cache.pop(key, None)
-        return None
-    return data
-
-def cache_set(key: str, data, ttl: int = 900):
-    _cache[key] = (time.time() + ttl, data)
-
-def safe_request(method: str, url: str, *, headers=None, params=None, json=None, timeout=20,
-                 service=None, retries=3, backoff=0.6):
-    # local rate-limit
-    if service and not _acquire_token(service):
-        raise HTTPException(status_code=429, detail=f"Rate limit: too many {service} requests. Try again shortly.")
-    for attempt in range(retries):
-        try:
-            resp = requests.request(method, url, headers=headers, params=params, json=json, timeout=timeout)
-        except requests.RequestException as e:
-            if attempt == retries - 1:
-                raise HTTPException(status_code=502, detail=f"{service or 'upstream'} request failed: {e}")
-            time.sleep(backoff * (2 ** attempt))
-            continue
-        # handle upstream rate-limit / overload
-        if resp.status_code in (429, 503):
-            retry_after = float(resp.headers.get("Retry-After") or 0)
-            sleep_s = max(retry_after, backoff * (2 ** attempt))
-            if attempt == retries - 1:
-                raise HTTPException(status_code=429, detail=f"{service} rate limited: {resp.text}")
-            time.sleep(sleep_s)
-            continue
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=502, detail=f"{service} error: {resp.text}")
-        return resp
-
-# --- Small helpers ---
-def _to_list(value):
-    """Accept list OR comma-separated string; returns cleaned list."""
-    if isinstance(value, list):
-        return [str(x).strip() for x in value if str(x).strip()]
-    if isinstance(value, str):
-        return [x.strip() for x in value.split(",") if x.strip()]
-    return []
-
+# --- Helpers to keep payloads clean ---
 def pick_macros(nutrition: dict) -> dict:
     """Return only calories/protein/fat/carbs from Spoonacular nutrition."""
     out = {"calories": 0.0, "protein": 0.0, "fat": 0.0, "carbs": 0.0}
@@ -137,49 +65,33 @@ def require_spoonacular():
             detail="Spoonacular API key missing. Set SPOONACULAR_API_KEY in .env",
         )
 
-# --- Routes ---
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/docs")
-
+# --- Endpoints ---
 @app.get("/health")
 def health():
     return {"ok": True}
-
-@app.get("/readyz")
-def readyz():
-    return {
-        "nutritionixConfigured": bool(NIX_APP_ID and NIX_API_KEY),
-        "spoonacularConfigured": bool(SPOON_KEY),
-        "cacheKeys": len(_cache),
-    }
 
 @app.post("/calculate", tags=["macros"])
 def calculate(body: dict = Body(..., example={"foods": ["2 eggs", "200g rice", "150g chicken"]})):
     """Totals calories/macros using Nutritionix natural-language endpoint."""
     require_nutritionix()
-    foods = _to_list(body.get("foods") or body.get("query"))
-    if not foods:
-        raise HTTPException(
-            status_code=400,
-            detail="Expected { foods: string[] } or { query: 'comma,separated' }",
-        )
-    q = ", ".join(foods)
+    foods = body.get("foods", [])
+    if not isinstance(foods, list) or not foods:
+        raise HTTPException(status_code=400, detail="Provide foods as a non-empty list")
+    q = ", ".join(map(str, foods))
 
-    # cache + safe request to Nutritionix
-    cache_key = f"nix:{q.lower()}"
-    data = cache_get(cache_key)
-    if not data:
-        headers = {
-            "x-app-id": NIX_APP_ID,
-            "x-app-key": NIX_API_KEY,
-            "Content-Type": "application/json",
-            "x-remote-user-id": "0",
-        }
-        r = safe_request("POST", NUTRITIONIX_URL, headers=headers, json={"query": q},
-                         service="nutritionix", retries=3, backoff=0.6)
-        data = r.json()
-        cache_set(cache_key, data, ttl=900)  # 15 minutes
+    headers = {
+        "x-app-id": NIX_APP_ID,
+        "x-app-key": NIX_API_KEY,
+        "Content-Type": "application/json",
+        "x-remote-user-id": "0",
+    }
+    try:
+        r = requests.post(NUTRITIONIX_URL, headers=headers, json={"query": q}, timeout=20)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Nutritionix request failed: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Nutritionix error: {r.text}")
+    data = r.json()
 
     totals = {"calories": 0.0, "protein": 0.0, "fat": 0.0, "carbs": 0.0}
     items = []
@@ -211,45 +123,42 @@ def calculate(body: dict = Body(..., example={"foods": ["2 eggs", "200g rice", "
 def recipes(body: dict = Body(..., example={"ingredients": ["chicken", "rice", "broccoli"], "count": 5})):
     """Find recipes by ingredients using Spoonacular, and return a clean payload."""
     require_spoonacular()
-    ingredients = _to_list(body.get("ingredients") or body.get("query"))
-    count = int(body.get("count", 5) or 5)
-    if not ingredients:
-        raise HTTPException(
-            status_code=400,
-            detail="Expected { ingredients: string[] } or { query: 'a,b,c' }",
-        )
+    ingredients = body.get("ingredients", [])
+    count = int(body.get("count", 5))
+    if not isinstance(ingredients, list) or not ingredients:
+        raise HTTPException(status_code=400, detail="Provide ingredients as a non-empty list")
 
-    # 1) Find candidates by ingredients (cached)
+    # 1) Find candidates by ingredients
     params = {
         "ingredients": ",".join(ingredients),
-        "number": max(1, min(count, 10)),   # clamp to <=10 per call
+        "number": count,
         "ranking": 1,
         "ignorePantry": "true",
         "apiKey": SPOON_KEY,
     }
-    find_key = f"spoon:find:{params['ingredients'].lower()}:{params['number']}"
-    found = cache_get(find_key)
-    if not found:
-        r = safe_request("GET", f"{SPOON_URL}/findByIngredients", params=params,
-                         service="spoonacular", retries=3, backoff=0.6)
-        found = r.json()
-        cache_set(find_key, found, ttl=900)
+    try:
+        r = requests.get(f"{SPOON_URL}/findByIngredients", params=params, timeout=20)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Spoonacular request failed: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Spoonacular error: {r.text}")
+    found = r.json()
 
-    # 2) Fetch details per recipe (cached) and sanitize payload
+    # 2) Fetch details for each candidate and sanitize payload
     out = []
     for rec in found:
         rid = rec.get("id")
         used   = [u.get("name") for u in rec.get("usedIngredients", [])]
         missed = [m.get("name") for m in rec.get("missedIngredients", [])]
 
-        info_key = f"spoon:info:{rid}"
-        d = cache_get(info_key)
-        if not d:
-            p = {"includeNutrition": "true", "apiKey": SPOON_KEY}
-            r2 = safe_request("GET", f"{SPOON_URL}/{rid}/information", params=p,
-                              service="spoonacular", retries=3, backoff=0.6)
+        p = {"includeNutrition": "true", "apiKey": SPOON_KEY}
+        try:
+            r2 = requests.get(f"{SPOON_URL}/{rid}/information", params=p, timeout=20)
+            if r2.status_code >= 400:
+                continue
             d = r2.json()
-            cache_set(info_key, d, ttl=900)
+        except requests.RequestException:
+            continue
 
         out.append({
             "id": d.get("id"),
@@ -272,9 +181,11 @@ def plan(body: dict = Body(..., example={
     "inventory": ["2 eggs", "200g rice", "150g chicken"],
     "targetMeals": 3
 })):
-    """Stub planner: returns two example lunches + a sample grocery delta."""
-    profile = body.get("profile") or {}
-    target = int(body.get("targetMeals", 3) or 3)
+    """Stub planner: returns two example lunches + a sample grocery delta.
+    Replace with your greedy allocator when ready.
+    """
+    profile = body.get("profile", {})
+    target = int(body.get("targetMeals", 3))
 
     sample = [
         {
@@ -298,7 +209,7 @@ def plan(body: dict = Body(..., example={
     grocery = [{"name": "broccoli", "qty": 200, "unit": "g", "reason": "low"}]
     return {"meals": sample[:target], "grocery": grocery, "note": "planner stub; replace with real allocator"}
 
-# Run via: python main.py  (optional)
+# Allow `python main.py` to run the server directly (optional)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)
