@@ -1,14 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 /**
- * Meal Queue Web App (single-file demo)
- * FRONTEND-ONLY: React + Tailwind (no external libs)
- *
- * This build focuses on a light, muted gray/blue landing (onboarding) page
- * with a gentle fade-in. It also keeps clean seams for backend handoff later.
- *
- * Color palette: slate/stone with subtle blue accents.
- * Animations: fade-in via Tailwind transitions (no custom config required).
+ * ChefFlow — Frontend-only demo (single file)
+ * Light muted gray/blue theme + fade-in onboarding
+ * Carbs/Fat targets with meters; no "max prep" field (prep is per-recipe)
+ * Clean backend seam via requestMealPlan()
  */
 
 // ========== Types ==========
@@ -34,19 +30,19 @@ type Ingredient = {
 
 type InventoryItem = {
   name: string;
-  qty: number; // in the same conceptual unit you’ll consume with
+  qty: number;
   unit: Unit;
   category: "protein" | "carb" | "veg" | "dairy" | "sauce" | "bread" | "other";
   perishable?: boolean;
-  minThreshold?: number; // when below, add to shopping list
+  minThreshold?: number;
 };
 
 type Recipe = {
   id: string;
   name: string;
   prepLeadMin: number; // time BEFORE cooking (e.g., thaw/soak)
-  cookTimeMin: number; // active + passive cook
-  steps: string[]; // concise steps
+  cookTimeMin: number; // cook time (active+passive)
+  steps: string[];
   ingredients: Ingredient[];
   tags?: string[];
 };
@@ -63,29 +59,30 @@ type UserProfile = {
   age: number | null;
   height: string; // "5'7\"" or cm
   weightLbs: number | null;
-  desiredCalories: number | null; // optional
-  desiredProtein: number | null; // g/day
+  desiredCalories: number | null; // kcal/day
+  desiredProtein: number | null;  // g/day
+  desiredCarbs: number | null;    // g/day
+  desiredFat: number | null;      // g/day
   spiceTolerance: "mild" | "medium" | "hot" | "insane";
-  dislikes: string; // comma-separated for now
-  mealsToPrep: number; // count the app should plan for
-  fridgeText: string; // free text list of items on hand
-  maxPrepMinutes: number | null; // per-meal prep time cap
+  dislikes: string; // comma-separated
+  mealsToPrep: number;
+  fridgeText: string;
   onboardingComplete: boolean;
 };
 
-// Optional: request/response seams for backend handoff later
+// Optional: request/response seam for backend handoff later
 export type MealKey = {
-  day: string; // e.g., "Mon"
-  meal: string; // e.g., "Lunch"
+  day: string; // "Mon"
+  meal: string; // "Lunch"
   name: string;
   calories: number;
   protein: number;
   fat: number;
   carbs: number;
-  recipe: string; // markdown or structured steps
+  recipe: string; // markdown or text steps
   prepTimeWarning?: string | null;
-  usesFridgeInventory: string[]; // matched items
-  tools: string[]; // e.g., ["skillet", "oven"]
+  usesFridgeInventory: string[];
+  tools: string[];
 };
 
 export type MealPlanRequest = {
@@ -95,7 +92,7 @@ export type MealPlanRequest = {
 
 export type MealPlanResponse = {
   queue: MealKey[]; // for the week
-  grocery: { name: string; qty: number; unit: Unit }[]; // extras to buy
+  grocery: { name: string; qty: number; unit: Unit }[];
 };
 
 // ========== Seed Data (demo) ==========
@@ -128,7 +125,7 @@ const recipes: Recipe[] = [
     cookTimeMin: 15,
     steps: [
       "Pat 8 oz shrimp dry. Season with 1 tsp oil, 1 clove garlic (minced), 1/2 tsp paprika, salt/pepper.",
-      "Sear shrimp 2–3 min/side on medium‑high until pink.",
+      "Sear shrimp 2–3 min/side on medium-high until pink.",
       "Warm 1 cup cooked beans in a pan 5 min (pinch cumin + squeeze lime).",
       "Dice 1/2 cucumber + slice 1/4 red onion + 1 tbsp cilantro; toss with juice of 1/2 lime + pinch salt.",
       "Plate: shrimp + beans + salad. Optional 1 tbsp cotija on top.",
@@ -206,7 +203,7 @@ const seedQueue: Meal[] = [
 
 // ========== Persistence ==========
 const LS_KEY = "meal-queue-state-v2";
-const PROFILE_KEY = "meal-queue-profile-v2-light";
+const PROFILE_KEY = "meal-queue-profile-v3-light"; // bump to avoid old cache
 
 type AppState = {
   inventory: InventoryItem[];
@@ -238,11 +235,12 @@ const loadProfile = (): UserProfile => {
       weightLbs: null,
       desiredCalories: 1800,
       desiredProtein: 150,
+      desiredCarbs: 225,
+      desiredFat: 65,
       spiceTolerance: "medium",
       dislikes: "",
       mealsToPrep: 6,
       fridgeText: "",
-      maxPrepMinutes: 30,
       onboardingComplete: false,
     };
   }
@@ -264,20 +262,15 @@ function formatQty(qty: number, unit: Unit) {
   return `${qty}${unit === "pcs" ? " pcs" : ` ${unit}`}`;
 }
 
-// --- Unit conversion helpers (volume-biased demo) ---
+// --- Unit conversion helpers (volume-biased demo for tbsp/tsp/oz/cup/ml) ---
 const VOLUME_EQUIV: Record<Unit, number> = {
   tsp: 1,
-  tbsp: 3, // 1 tbsp = 3 tsp
-  oz: 6, // 1 fl oz ≈ 6 tsp
-  cup: 48, // 1 cup = 48 tsp
+  tbsp: 3,
+  oz: 6,     // 1 fl oz ≈ 6 tsp
+  cup: 48,   // 1 cup = 48 tsp
   cups: 48,
-  ml: 0.202884, // ≈ tsp
-  g: NaN,
-  lb: NaN,
-  piece: NaN,
-  pcs: NaN,
-  slice: NaN,
-  clove: NaN,
+  ml: 0.202884,
+  g: NaN, lb: NaN, piece: NaN, pcs: NaN, slice: NaN, clove: NaN,
 };
 
 function canConvert(a: Unit, b: Unit) {
@@ -299,12 +292,10 @@ function consumeInventory(inv: InventoryItem[], ing: Ingredient[]): InventoryIte
   for (const req of ing) {
     let idx = next.findIndex((i) => i.name === req.name && i.unit === req.unit);
     if (idx < 0) idx = next.findIndex((i) => i.name === req.name && canConvert(req.unit, i.unit));
-    if (idx < 0) continue; // not in stock
-
+    if (idx < 0) continue;
     const invItem = next[idx];
     const reqInInvUnits = req.unit === invItem.unit ? req.qty : convertQty(req.qty, req.unit, invItem.unit);
-    if (reqInInvUnits == null) continue; // non-convertible units
-
+    if (reqInInvUnits == null) continue;
     invItem.qty = Math.max(0, parseFloat((invItem.qty - reqInInvUnits).toFixed(2)));
   }
   return next;
@@ -333,14 +324,11 @@ const wait = (ms: number) => new Promise((res) => setTimeout(res, ms));
 // ========== Backend seam (stub) ==========
 async function requestMealPlan(_req: MealPlanRequest): Promise<MealPlanResponse> {
   // TODO: replace with real fetch("/api/plan", { method: "POST", body: JSON.stringify(_req) })
-  await wait(700);
-  return {
-    queue: [],
-    grocery: [],
-  };
+  await wait(500);
+  return { queue: [], grocery: [] };
 }
 
-// ========== Components ==========
+// ========== UI Bits ==========
 function LoadingScreen({ label = "Loading" }: { label?: string }) {
   return (
     <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-900">
@@ -353,15 +341,20 @@ function LoadingScreen({ label = "Loading" }: { label?: string }) {
 }
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <div className={`rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>{children}</div>
-  );
+  return <div className={`rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>{children}</div>;
 }
 
+// ========== Onboarding ==========
 function Onboarding({ onDone }: { onDone: () => void }) {
   const [profile, setProfile] = useState<UserProfile>(loadProfile());
   const [loading, setLoading] = useState(false);
-  const [visible, setVisible] = useState(false); // fade-in control
+  const [visible, setVisible] = useState(false); // fade-in
+
+  // Baseline targets for meters (approx "average" scale)
+  const BASE = { calories: 2000, protein: 100, carbs: 275, fat: 70 };
+  const clamp = (n: number, min = 0, max = 150) => Math.max(min, Math.min(max, n));
+  const pct = (val: number | null | undefined, base: number) =>
+    clamp(Math.round(((val || 0) / base) * 100));
 
   useEffect(() => {
     const t = setTimeout(() => setVisible(true), 40);
@@ -370,11 +363,10 @@ function Onboarding({ onDone }: { onDone: () => void }) {
 
   const submit = async () => {
     setLoading(true);
-    // seam: when backend is ready, send profile + inventory to get a generated plan
     try {
       await requestMealPlan({ profile, inventory: seedInventory });
     } finally {
-      await wait(500);
+      await wait(400);
       saveProfile({ ...profile, onboardingComplete: true });
       setLoading(false);
       onDone();
@@ -383,7 +375,7 @@ function Onboarding({ onDone }: { onDone: () => void }) {
 
   const randomize = async () => {
     setLoading(true);
-    await wait(400);
+    await wait(300);
     setProfile((p) => ({ ...p, onboardingComplete: true }));
     saveProfile({ ...profile, onboardingComplete: true });
     setLoading(false);
@@ -392,122 +384,161 @@ function Onboarding({ onDone }: { onDone: () => void }) {
 
   if (loading) return <LoadingScreen label="Setting things up" />;
 
+  const Meter = ({ label, value, base }: { label: string; value: number | null | undefined; base: number }) => {
+    const percent = pct(value, base);
+    return (
+      <div>
+        <div className="flex items-center justify-between text-xs text-slate-600 mb-1">
+          <span>{label}</span>
+          <span>
+            {value ?? 0}
+            {label === "Calories" ? " kcal" : " g"} • {percent}%
+          </span>
+        </div>
+        <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+          <div style={{ width: `${percent}%` }} className="h-full bg-blue-500 transition-all" />
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className={`min-h-screen bg-slate-100 text-slate-900 transition-opacity duration-700 ${
-      visible ? "opacity-100" : "opacity-0"
-    }`}>
-      <div className="max-w-5xl mx-auto p-6 md:p-10 space-y-6">
+    <div className={`min-h-screen bg-slate-100 text-slate-900 transition-opacity duration-700 ${visible ? "opacity-100" : "opacity-0"}`}>
+      <div className="max-w-6xl mx-auto p-8 md:p-12 space-y-8">
         <header className="space-y-2">
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-800">Welcome</h1>
-          <p className="text-slate-600 text-sm">
-            Tell me your targets and what you have. I’ll craft a precise grocery list and a zero‑leftovers plan.
+          <h1 className="text-4xl font-semibold tracking-tight text-slate-800">Welcome</h1>
+          <p className="text-slate-600 text-base">
+            Tell me your targets and what you have. I’ll craft a precise grocery list and a zero-leftovers plan.
           </p>
         </header>
 
-        {/* quick summary guide */}
-        <Card className="p-4 md:p-5">
-          <div className="grid md:grid-cols-3 gap-4">
+        {/* Targets with meters */}
+        <Card className="p-6">
+          <div className="grid md:grid-cols-3 gap-6">
             <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">Daily Targets</div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs text-slate-500 self-center">Calories</label>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Daily Targets</div>
+              <div className="grid grid-cols-2 gap-3 items-center">
+                <label className="text-xs text-slate-600">Calories</label>
                 <input
                   type="number"
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
                   value={profile.desiredCalories ?? ""}
                   onChange={(e) => setProfile((p) => ({ ...p, desiredCalories: Number(e.target.value) }))}
-                  placeholder="1800"
+                  placeholder="2000"
                 />
-                <label className="text-xs text-slate-500 self-center">Protein (g)</label>
+
+                <label className="text-xs text-slate-600">Protein (g)</label>
                 <input
                   type="number"
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
                   value={profile.desiredProtein ?? ""}
                   onChange={(e) => setProfile((p) => ({ ...p, desiredProtein: Number(e.target.value) }))}
-                  placeholder="150"
+                  placeholder="100"
+                />
+
+                <label className="text-xs text-slate-600">Carbs (g)</label>
+                <input
+                  type="number"
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                  value={profile.desiredCarbs ?? ""}
+                  onChange={(e) => setProfile((p) => ({ ...p, desiredCarbs: Number(e.target.value) }))}
+                  placeholder="275"
+                />
+
+                <label className="text-xs text-slate-600">Fat (g)</label>
+                <input
+                  type="number"
+                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                  value={profile.desiredFat ?? ""}
+                  onChange={(e) => setProfile((p) => ({ ...p, desiredFat: Number(e.target.value) }))}
+                  placeholder="70"
                 />
               </div>
             </div>
 
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">You</div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs text-slate-500 self-center">Age</label>
-                <input
-                  type="number"
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  value={profile.age ?? ""}
-                  onChange={(e) => setProfile((p) => ({ ...p, age: Number(e.target.value) }))}
-                  placeholder="21"
-                />
-                <label className="text-xs text-slate-500 self-center">Height</label>
-                <input
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  value={profile.height}
-                  onChange={(e) => setProfile((p) => ({ ...p, height: e.target.value }))}
-                  placeholder={`5'7"`}
-                />
-                <label className="text-xs text-slate-500 self-center">Weight (lb)</label>
-                <input
-                  type="number"
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  value={profile.weightLbs ?? ""}
-                  onChange={(e) => setProfile((p) => ({ ...p, weightLbs: Number(e.target.value) }))}
-                  placeholder="160"
-                />
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">Prep Settings</div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs text-slate-500 self-center">Meals to Prep</label>
-                <input
-                  type="number"
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  value={profile.mealsToPrep}
-                  onChange={(e) => setProfile((p) => ({ ...p, mealsToPrep: Number(e.target.value) }))}
-                  placeholder="6"
-                />
-                <label className="text-xs text-slate-500 self-center">Max Prep (min)</label>
-                <input
-                  type="number"
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  value={profile.maxPrepMinutes ?? ""}
-                  onChange={(e) => setProfile((p) => ({ ...p, maxPrepMinutes: Number(e.target.value) }))}
-                  placeholder="30"
-                />
-                <label className="text-xs text-slate-500 self-center">Spice</label>
-                <select
-                  className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
-                  value={profile.spiceTolerance}
-                  onChange={(e) => setProfile((p) => ({ ...p, spiceTolerance: e.target.value as UserProfile["spiceTolerance"] }))}
-                >
-                  <option value="mild">Mild</option>
-                  <option value="medium">Medium</option>
-                  <option value="hot">Hot</option>
-                  <option value="insane">Insane</option>
-                </select>
-              </div>
+            {/* Meters */}
+            <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4 content-start">
+              <Meter label="Calories" value={profile.desiredCalories} base={BASE.calories} />
+              <Meter label="Protein" value={profile.desiredProtein} base={BASE.protein} />
+              <Meter label="Carbs" value={profile.desiredCarbs} base={BASE.carbs} />
+              <Meter label="Fat" value={profile.desiredFat} base={BASE.fat} />
             </div>
           </div>
         </Card>
 
-        <div className="grid md:grid-cols-2 gap-4">
-          <Card className="p-4 md:p-5">
-            <label className="block text-xs text-slate-500 mb-1">Dislikes / Avoid</label>
+        <div className="grid md:grid-cols-2 gap-6">
+          <Card className="p-6">
+            <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">You</div>
+            <div className="grid grid-cols-2 gap-3 items-center">
+              <label className="text-xs text-slate-600">Age</label>
+              <input
+                type="number"
+                className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                value={profile.age ?? ""}
+                onChange={(e) => setProfile((p) => ({ ...p, age: Number(e.target.value) }))}
+                placeholder="21"
+              />
+              <label className="text-xs text-slate-600">Height</label>
+              <input
+                className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                value={profile.height}
+                onChange={(e) => setProfile((p) => ({ ...p, height: e.target.value }))}
+                placeholder={`5'7"`}
+              />
+              <label className="text-xs text-slate-600">Weight (lb)</label>
+              <input
+                type="number"
+                className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                value={profile.weightLbs ?? ""}
+                onChange={(e) => setProfile((p) => ({ ...p, weightLbs: Number(e.target.value) }))}
+                placeholder="160"
+              />
+            </div>
+          </Card>
+
+          <Card className="p-6">
+            <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Prep & Preferences</div>
+            <div className="grid grid-cols-2 gap-3 items-center">
+              <label className="text-xs text-slate-600">Meals to Prep</label>
+              <input
+                type="number"
+                className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                value={profile.mealsToPrep}
+                onChange={(e) => setProfile((p) => ({ ...p, mealsToPrep: Number(e.target.value) }))}
+                placeholder="6"
+              />
+              <label className="text-xs text-slate-600">Spice</label>
+              <select
+                className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
+                value={profile.spiceTolerance}
+                onChange={(e) =>
+                  setProfile((p) => ({ ...p, spiceTolerance: e.target.value as UserProfile["spiceTolerance"] }))
+                }
+              >
+                <option value="mild">Mild</option>
+                <option value="medium">Medium</option>
+                <option value="hot">Hot</option>
+                <option value="insane">Insane</option>
+              </select>
+            </div>
+          </Card>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-6">
+          <Card className="p-6">
+            <label className="block text-xs text-slate-500 mb-2">Dislikes / Avoid</label>
             <input
-              className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm"
+              className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-base"
               value={profile.dislikes}
               onChange={(e) => setProfile((p) => ({ ...p, dislikes: e.target.value }))}
               placeholder="e.g., olives, blue cheese"
             />
           </Card>
 
-          <Card className="p-4 md:p-5">
-            <label className="block text-xs text-slate-500 mb-1">What’s in your fridge to use?</label>
+          <Card className="p-6">
+            <label className="block text-xs text-slate-500 mb-2">What’s in your fridge to use?</label>
             <textarea
-              className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 h-24 text-sm"
+              className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 h-28 text-base"
               value={profile.fridgeText}
               onChange={(e) => setProfile((p) => ({ ...p, fridgeText: e.target.value }))}
               placeholder="e.g., steak, shrimp, beans, yogurt, cucumbers"
@@ -515,32 +546,43 @@ function Onboarding({ onDone }: { onDone: () => void }) {
           </Card>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           <button
             onClick={submit}
-            className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium"
-          >Build My Plan</button>
+            className="px-5 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-base"
+          >
+            Build My Plan
+          </button>
           <button
             onClick={randomize}
-            className="px-4 py-2 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 font-medium"
-          >Skip / Randomize</button>
+            className="px-5 py-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 font-medium text-base"
+          >
+            Skip / Randomize
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-function QueuePage({ state, setState }: { state: AppState; setState: (s: AppState) => void }) {
+// ========== Queue Page ==========
+function QueuePage({
+  state,
+  setState,
+}: {
+  state: AppState;
+  setState: React.Dispatch<React.SetStateAction<AppState>>; // dispatcher type so functional updaters work
+}) {
   const { queue, inventory, completed } = state;
   const [loading, setLoading] = useState(false);
-  const [altOffset, setAltOffset] = useState(3); // default: alternate with 3-days-ahead meal
+  const [altOffset, setAltOffset] = useState(3); // swap with +N ahead
 
   const currentMeal = queue[0];
   const currentRecipe = currentMeal ? getRecipe(currentMeal.recipeId) : undefined;
   const nextUp = queue
     .slice(1, 4)
     .map((m) => ({ m, r: getRecipe(m.recipeId) }))
-    .filter((x) => !!x.r) as { m: Meal; r: Recipe }[];
+    .filter((x): x is { m: Meal; r: Recipe } => Boolean(x.r));
 
   const prepWarning = useMemo(() => {
     if (!currentRecipe) return null;
@@ -625,11 +667,11 @@ function QueuePage({ state, setState }: { state: AppState; setState: (s: AppStat
                   </ol>
                 </div>
                 <div>
-                  <h3 className="font-semibold mb-2 text-slate-800">Ingredients (auto‑deduct)</h3>
+                  <h3 className="font-semibold mb-2 text-slate-800">Ingredients (auto-deduct)</h3>
                   <ul className="space-y-1 text-sm text-slate-700">
                     {currentRecipe.ingredients.map((ing, i) => (
                       <li key={i} className="flex items-center justify-between">
-                        <span>{(ing as any).name}</span>
+                        <span>{ing.name}</span>
                         <span className="text-slate-500">{formatQty(ing.qty, ing.unit)}</span>
                       </li>
                     ))}
@@ -639,15 +681,21 @@ function QueuePage({ state, setState }: { state: AppState; setState: (s: AppStat
                     <button
                       onClick={completeCurrentMeal}
                       className="py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium"
-                    >Complete</button>
+                    >
+                      Complete
+                    </button>
                     <button
                       onClick={skipCurrentMeal}
                       className="py-2 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 font-medium"
-                    >Skip</button>
+                    >
+                      Skip
+                    </button>
                     <button
                       onClick={alternateSwap}
                       className="py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-medium"
-                    >Alternate</button>
+                    >
+                      Alternate
+                    </button>
                   </div>
                 </div>
               </div>
@@ -664,7 +712,9 @@ function QueuePage({ state, setState }: { state: AppState; setState: (s: AppStat
                 <div key={m.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <div className="text-xs uppercase tracking-wider text-slate-500">{m.label}</div>
                   <div className="font-medium text-slate-800">{r.name}</div>
-                  <div className="text-xs text-slate-500 mt-1">Lead: {r.prepLeadMin} min • Cook: {r.cookTimeMin} min</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    Lead: {r.prepLeadMin} min • Cook: {r.cookTimeMin} min
+                  </div>
                 </div>
               ))}
             </div>
@@ -689,10 +739,13 @@ function QueuePage({ state, setState }: { state: AppState; setState: (s: AppStat
                             className="w-20 bg-white border border-slate-300 rounded-lg px-2 py-1 text-right text-sm"
                             value={it.qty}
                             onChange={(e) => {
-                              const qty = Number(e.target.value);
+                              const raw = e.target.value;
+                              const qty = raw === "" ? 0 : Number(raw);
                               setState((s) => ({
                                 ...s,
-                                inventory: s.inventory.map((x) => (x.name === it.name ? { ...x, qty } : x)),
+                                inventory: s.inventory.map((x) =>
+                                  x.name === it.name ? { ...x, qty } : x
+                                ),
                               }));
                             }}
                           />
@@ -715,7 +768,9 @@ function QueuePage({ state, setState }: { state: AppState; setState: (s: AppStat
                 {shop.map((it) => (
                   <li key={it.name} className="flex items-center justify-between">
                     <span className="text-slate-800">{it.name}</span>
-                    <span className="text-slate-500">low (current: {it.qty} {it.unit})</span>
+                    <span className="text-slate-500">
+                      low (current: {it.qty} {it.unit})
+                    </span>
                   </li>
                 ))}
               </ul>
